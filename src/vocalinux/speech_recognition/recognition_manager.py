@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     import numpy as np
 
+from ..audio.playback_ducker import default_dictation_duck_session, duck_delay_seconds
 from ..common_types import RecognitionState
 from ..ui.audio_feedback import play_error_sound, play_start_sound, play_stop_sound
 from ..ui.config_manager import _multilingual_sibling
@@ -1220,6 +1221,16 @@ class SpeechRecognitionManager:
         self._capture_sample_rate = 16000  # Default, updated when device is opened
         self._capture_channels = 1  # Default, updated when device is opened
         self._capture_downmix_channel = None  # Speech-gated sticky N>=3 channel for open stream
+
+        # Recover a sink left quiet by a crash before doing anything slow.
+        # Tests inject a session so this never touches a real audio server.
+        injected_duck = kwargs.get("playback_duck")
+        self._playback_duck = (
+            default_dictation_duck_session() if injected_duck is None else injected_duck
+        )
+        # Serializes arm vs release: a failure path that already released the
+        # duck must not be followed by an arm that re-lowers the sink.
+        self._playback_duck_lock = threading.Lock()
 
         # Create models directory if it doesn't exist
         os.makedirs(MODELS_DIR, exist_ok=True)
@@ -3329,6 +3340,85 @@ class SpeechRecognitionManager:
         chunk_duration_ms = (1024 / 16000) * 1000
         return int(guard_ms / chunk_duration_ms)
 
+    def _playback_duck_delay_seconds(self) -> float:
+        """How long to let the start cue play before lowering other audio.
+
+        Sound effects off, or the Off tone, duck immediately. A mocked or
+        broken feedback module also ducks immediately rather than guessing.
+        """
+        try:
+            from ..ui import audio_feedback
+
+            enabled_fn = getattr(audio_feedback, "_is_sound_effects_enabled", None)
+            tone_fn = getattr(audio_feedback, "_resolved_tone", None)
+            duration_fn = getattr(audio_feedback, "_wav_duration_seconds", None)
+            path_fn = getattr(audio_feedback, "tone_sound_path", None)
+            # Separate checks so the type checker treats each as callable.
+            if not callable(enabled_fn) or not callable(tone_fn):
+                return 0.0
+            if not callable(duration_fn) or not callable(path_fn):
+                return 0.0
+            enabled = enabled_fn()
+            tone = tone_fn()
+            if not isinstance(enabled, bool) or not isinstance(tone, str):
+                return 0.0
+            if not enabled or tone == "off":
+                return duck_delay_seconds(
+                    sound_effects_enabled=False, tone=tone, cue_duration_seconds=0.0
+                )
+            path = path_fn(tone, "start")
+            if not isinstance(path, str):
+                return 0.0
+            duration = duration_fn(path)
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                return 0.0
+            return duck_delay_seconds(
+                sound_effects_enabled=True,
+                tone=tone,
+                cue_duration_seconds=float(duration),
+            )
+        except Exception:
+            logger.warning(
+                "Could not measure the start cue; ducking other audio immediately",
+                exc_info=True,
+            )
+            return 0.0
+
+    def _arm_playback_duck(self) -> None:
+        """Schedule a duck once dictation is actually listening."""
+        try:
+            if not self._playback_duck.enabled():
+                return
+            # The capture thread may already have failed and released the duck;
+            # arming now would lower playback in the error state with nothing
+            # left to put it back.
+            with self._playback_duck_lock:
+                if not self.should_record or self.state != RecognitionState.LISTENING:
+                    return
+                self._playback_duck.start(self._playback_duck_delay_seconds())
+        except Exception:
+            logger.error("Could not schedule playback duck", exc_info=True)
+
+    def _cancel_pending_playback_duck(self) -> None:
+        """Drop a duck whose timer has not fired. Does not change the volume."""
+        try:
+            self._playback_duck.cancel()
+        except Exception:
+            logger.error("Could not cancel playback duck", exc_info=True)
+
+    def release_playback_duck(self) -> None:
+        """Cancel a not-yet-applied duck and restore the sink. Safe to call twice.
+
+        Used when dictation ends, including error exits and quitting while the
+        microphone is still open. Failures are logged and never raised.
+        """
+        with self._playback_duck_lock:
+            self._cancel_pending_playback_duck()
+            try:
+                self._playback_duck.restore()
+            except Exception:
+                logger.error("Could not restore playback volume", exc_info=True)
+
     def start_recognition(self, mode: str = "toggle") -> bool:
         """Start the speech recognition process.
 
@@ -3406,6 +3496,8 @@ class SpeechRecognitionManager:
         self.recognition_thread = threading.Thread(target=self._perform_recognition)
         self.recognition_thread.daemon = True
         self.recognition_thread.start()
+        # After the threads exist: a start that returned early must not duck.
+        self._arm_playback_duck()
         return True
 
     def stop_recognition(self):
@@ -3415,14 +3507,19 @@ class SpeechRecognitionManager:
 
         logger.info("Stopping speech recognition")
 
-        # Stop recording FIRST to prevent capturing the stop sound
+        # Mark recording over before touching the duck so a concurrent arm
+        # sees the dictation as ended. The volume goes back only once the
+        # microphone thread has left the device, and before the stop cue.
         self.should_record = False
+        self._cancel_pending_playback_duck()
 
         # Wait for audio thread to finish recording and enqueue any pending audio
         # This is critical to prevent race condition where recognition thread exits
         # before the final audio segment is enqueued
         if self.audio_thread and self.audio_thread.is_alive():
             self.audio_thread.join(timeout=2.0)
+
+        self.release_playback_duck()
 
         # Play stop sound now that the audio thread is done and cannot capture it.
         # Kept before buffer processing so the cue still feels immediate.
@@ -3476,6 +3573,8 @@ class SpeechRecognitionManager:
         except ImportError as e:
             logger.error(f"Failed to import required audio libraries: {e}")
             logger.error("Please install required dependencies: pip install pyaudio numpy")
+            self.should_record = False
+            self.release_playback_duck()
             play_error_sound()
             self._update_state(RecognitionState.ERROR)
             return
@@ -3582,6 +3681,8 @@ class SpeechRecognitionManager:
                         stream = self._audio_stream
                         CHANNELS = self._capture_channels
                     else:
+                        self.should_record = False
+                        self.release_playback_duck()
                         play_error_sound()
                         audio.terminate()
                         self._update_state(RecognitionState.ERROR)
@@ -3595,6 +3696,7 @@ class SpeechRecognitionManager:
             self._recording_segment_has_speech = False
             log_level_interval = 0  # Counter for periodic level logging
             max_level_seen = 0.0
+            capture_failed = False
             # Accumulator for 512-sample Silero chunks.  When the capture rate
             # is higher than 16 kHz (e.g. 48 kHz), resampling produces fewer
             # than 1024 samples per read (~341 at 48 kHz), so the buffer may
@@ -3761,15 +3863,26 @@ class SpeechRecognitionManager:
                             continue  # Continue recording with new stream
                         else:
                             logger.error("Audio reconnection failed, stopping recording")
+                            capture_failed = True
                             break
                     else:
                         logger.warning(
                             "Audio error occurred too soon after last error, stopping recording"
                         )
+                        capture_failed = True
                         break
                 except Exception as e:
                     logger.error(f"Unexpected error reading audio data: {e}")
+                    capture_failed = True
                     break
+
+            # A dead microphone must not leave other audio lowered, or the
+            # session stuck in LISTENING, until the user happens to stop.
+            if capture_failed:
+                self.should_record = False
+                self.release_playback_duck()
+                play_error_sound()
+                self._update_state(RecognitionState.ERROR)
 
             # Clean up
             _safe_close_stream(stream)
@@ -3799,6 +3912,8 @@ class SpeechRecognitionManager:
 
         except Exception as e:
             logger.error(f"Error in audio recording: {e}")
+            self.should_record = False
+            self.release_playback_duck()
             play_error_sound()
             self._update_state(RecognitionState.ERROR)
 
