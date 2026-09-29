@@ -157,6 +157,7 @@ DEFAULT_CONFIG = {
         "start_minimized": False,
         "show_notifications": True,
         "show_missing_tray_warning": True,
+        "show_overlay": True,  # Floating on-screen dictation indicator
     },
     "general": {
         "autostart": False,
@@ -784,6 +785,14 @@ class ConfigManager:
         if "text_injection" not in self.config:
             self.config["text_injection"] = {}
         self.config["text_injection"]["paste_shortcut"] = normalize_paste_shortcut(shortcut)
+
+    def is_overlay_enabled(self) -> bool:
+        """Check if the floating dictation overlay is enabled (default True)."""
+        return self.get_bool("ui", "show_overlay", True)
+
+    def set_overlay_enabled(self, enabled: bool) -> None:
+        """Enable or disable the floating dictation overlay."""
+        self.set("ui", "show_overlay", bool(enabled))
 
     def _update_dict_recursive(self, target: dict, source: dict):
         """

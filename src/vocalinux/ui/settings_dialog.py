@@ -35,9 +35,6 @@ from gi.repository import Gdk, GLib, GObject, Gtk, Pango  # noqa: E402
 from ..common_types import RecognitionState, _EvdevCaptureDevice  # noqa: E402
 from ..speech_recognition.silero_vad import is_silero_available  # noqa: E402
 from ..utils import parakeet_model_info as parakeet  # noqa: E402
-from ..utils.faster_whisper_model_info import (
-    FASTER_WHISPER_MODEL_INFO,
-)
 from ..utils.faster_whisper_model_info import delete_model as delete_faster_whisper_model
 from ..utils.faster_whisper_model_info import (  # noqa: E402
     get_recommended_model as get_recommended_faster_whisper_model,
@@ -81,10 +78,6 @@ from ..utils.whisper_model_info import (  # noqa: E402
     whisper_model_file,
 )
 from ..utils.whispercpp_model_info import MODEL_SIZES as WHISPERCPP_MODEL_SIZES
-from ..utils.whispercpp_model_info import (
-    WHISPERCPP_MODEL_INFO,
-    default_variant_for_size,
-)
 from ..utils.whispercpp_model_info import delete_model as delete_whispercpp_model
 from ..utils.whispercpp_model_info import (
     detect_compute_backend,
@@ -120,6 +113,14 @@ from .keyboard_backends import (  # noqa: E402
     parse_shortcut_spec,
 )
 from .keyboard_backends.evdev_backend import MODIFIER_KEY_CODES  # noqa: E402
+
+from ..utils.faster_whisper_model_info import (  # isort:skip
+    FASTER_WHISPER_MODEL_INFO,
+)
+from ..utils.whispercpp_model_info import (  # isort:skip
+    WHISPERCPP_MODEL_INFO,
+    default_variant_for_size,
+)
 
 # Avoid circular imports for type checking
 if TYPE_CHECKING:
@@ -2421,6 +2422,7 @@ class SettingsDialog(Gtk.Dialog):
         initial_page: Optional[str] = None,
         pending_update: Optional[ReleaseInfo] = None,
         update_status_callback: callable = None,
+        overlay_enabled_callback: Optional[Callable[[bool], None]] = None,
     ):
         super().__init__(title="Vocalinux Settings", transient_for=parent, flags=0)
         # Force window decorations (title-bar close) on all WMs. An in-window
@@ -2433,6 +2435,7 @@ class SettingsDialog(Gtk.Dialog):
         self.speech_engine = speech_engine
         self.shortcut_update_callback = shortcut_update_callback
         self.update_status_callback = update_status_callback
+        self.overlay_enabled_callback = overlay_enabled_callback
         self._test_active = False
         self._test_result = ""
         self._initializing = True  # Flag to prevent auto-apply during initialization
@@ -3033,11 +3036,23 @@ class SettingsDialog(Gtk.Dialog):
         )
         group.add_row(missing_tray_warning_row)
 
+        self.show_overlay_switch = Gtk.Switch()
+        self.show_overlay_switch.set_tooltip_text(
+            "Show a floating glowing indicator on screen while the microphone is active"
+        )
+        show_overlay_row = PreferenceRow(
+            title="Show Dictation Overlay",
+            subtitle="Floating on-screen glow when listening or processing",
+            widget=self.show_overlay_switch,
+        )
+        group.add_row(show_overlay_row)
+
         self.general_tab.pack_start(group, False, False, 0)
 
         self.autostart_switch.connect("state-set", self._on_autostart_toggled)
         self.start_minimized_switch.connect("state-set", self._on_start_minimized_toggled)
         self.missing_tray_warning_switch.connect("state-set", self._on_missing_tray_warning_toggled)
+        self.show_overlay_switch.connect("state-set", self._on_show_overlay_toggled)
 
     def _build_auto_pause_section(self):
         """Build Auto-Pause settings: enable toggle + process name list."""
@@ -3420,6 +3435,22 @@ class SettingsDialog(Gtk.Dialog):
         logger.info(f"Missing tray warning toggled: {enabled}")
         self.config_manager.set("ui", "show_missing_tray_warning", enabled)
         self.config_manager.save_settings()
+        return False
+
+    def _on_show_overlay_toggled(self, widget: Gtk.Switch, state: bool) -> bool:
+        """Handle toggle of the floating dictation overlay switch."""
+        if self._initializing or self._applying_settings:
+            return False
+
+        enabled = bool(state)
+        self.config_manager.set_overlay_enabled(enabled)
+        self.config_manager.save_settings()
+        if self.overlay_enabled_callback is not None:
+            try:
+                self.overlay_enabled_callback(enabled)
+            except Exception as e:
+                logger.warning(f"Overlay enabled callback failed: {e}")
+        logger.info(f"Dictation overlay {'enabled' if enabled else 'disabled'}")
         return False
 
     def _on_copy_to_clipboard_toggled(self, widget, state):
@@ -5567,6 +5598,7 @@ class SettingsDialog(Gtk.Dialog):
         autostart_enabled = general_settings.get("autostart", False)
         start_minimized = ui_settings.get("start_minimized", False)
         show_missing_tray_warning = ui_settings.get("show_missing_tray_warning", True)
+        show_overlay = ui_settings.get("show_overlay", True)
         copy_to_clipboard = text_injection_settings.get("copy_to_clipboard", False)
         auto_capitalize = text_injection_settings.get("auto_capitalize", True)
         append_trailing_space = text_injection_settings.get("append_trailing_space", True)
@@ -5575,6 +5607,7 @@ class SettingsDialog(Gtk.Dialog):
         self.autostart_switch.set_active(autostart_enabled)
         self.start_minimized_switch.set_active(start_minimized)
         self.missing_tray_warning_switch.set_active(show_missing_tray_warning)
+        self.show_overlay_switch.set_active(show_overlay)
         self.copy_to_clipboard_switch.set_active(copy_to_clipboard)
         self.auto_capitalize_switch.set_active(auto_capitalize)
         self.append_trailing_space_switch.set_active(append_trailing_space)

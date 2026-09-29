@@ -117,13 +117,20 @@ TYPELIBS=(
   GModule-2.0 Pango-1.0 PangoCairo-1.0 cairo-1.0 HarfBuzz-0.0 Atk-1.0
   freetype2-2.0 fontconfig-2.0 xlib-2.0
   AyatanaAppIndicator3-0.1 AyatanaAppindicator3-0.1 AppIndicator3-0.1
-  Dbusmenu-0.4 Notify-0.7 IBus-1.0 Rsvg-2.0
+  Dbusmenu-0.4 Notify-0.7 IBus-1.0 Rsvg-2.0 GtkLayerShell-0.1
 )
 
 # Runtime only needs one tray stack (same order as tray_indicator.py). Prefer
 # Ayatana; accept the rare lowercase typelib; legacy AppIndicator3 last.
 INDICATOR_TYPELIBS=(
   AyatanaAppIndicator3-0.1 AyatanaAppindicator3-0.1 AppIndicator3-0.1
+)
+
+# Soft dependencies the app itself falls back from: dictation_overlay.py uses a
+# plain GTK window when layer shell is absent, so these are copied when found
+# but must never block a direct build on a host without them.
+OPTIONAL_TYPELIBS=(
+  GtkLayerShell-0.1
 )
 
 # Shared libs loaded via GI at runtime (not linked into python3), so
@@ -136,6 +143,7 @@ GI_RUNTIME_LIBS=(
   libdbusmenu-gtk3.so.4
   libnotify.so.4
   libibus-1.0.so.5
+  libgtk-layer-shell.so.0
   # Nothing imports PangoXft, but linuxdeploy keeps its typelib, and a typelib
   # without its library is the trap that cost us IBus. 30 KB is cheaper than an
   # exception to the rule.
@@ -147,6 +155,10 @@ GI_RUNTIME_LIBS=(
 HOST_PROVIDED_LIBS=(
   libharfbuzz.so.0
   libharfbuzz-gobject.so.0
+  # Layer shell is optional end to end (see OPTIONAL_TYPELIBS): when its
+  # library cannot be bundled, the host's copy is the right one — the app
+  # falls back to a plain GTK window when no host copy exists either.
+  libgtk-layer-shell.so.0
 )
 
 # On the excludelist, but something we bundle links them, so the host cannot be
@@ -264,7 +276,7 @@ copy_typelibs() {
   done
 
   # Tray indicator typelibs are alternates; drop them from the hard-fail list
-  # when at least one copied successfully.
+  # when at least one copied successfully. Optional typelibs never hard-fail.
   local hard_missing=()
   for typelib in "${missing[@]}"; do
     case " ${INDICATOR_TYPELIBS[*]} " in
@@ -274,7 +286,10 @@ copy_typelibs() {
         fi
         ;;
       *)
-        hard_missing+=("$typelib")
+        case " ${OPTIONAL_TYPELIBS[*]} " in
+          *" ${typelib} "*) ;;
+          *) hard_missing+=("$typelib") ;;
+        esac
         ;;
     esac
   done
