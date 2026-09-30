@@ -207,6 +207,6 @@ class TranscriptionHistory:
             return
         try:
             callback()
-        except Exception:
+        except (RuntimeError, TypeError, ValueError) as e:
             # A misbehaving UI callback must never break recording.
-            logger.exception("Transcription history change callback failed")
+            logger.exception("Transcription history change callback failed: %s", e)
