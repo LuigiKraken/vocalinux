@@ -124,7 +124,7 @@ class TrayIndicator:
         speech_engine: SpeechRecognitionManagerProtocol,
         text_injector: TextInjectorProtocol,
         transcription_history: Optional[TranscriptionHistory] = None,
-    ):
+    ) -> None:
         """
         Initialize the system tray indicator.
 

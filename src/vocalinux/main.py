@@ -619,8 +619,13 @@ def main():
                         # A clear() landed mid-session: drop the segments
                         # spoken before it and re-bind the session to the new
                         # epoch so text dictated after the clear is kept.
+                        # This segment is dropped too: recognition latency
+                        # means it may be the decode of audio captured
+                        # before the clear, which must not re-enter history.
                         session_segments.clear()
                         session_epoch = transcription_history.epoch
+                        session_worker = worker
+                        return
                     session_worker = worker
                     session_segments.append(segment)
                     return
