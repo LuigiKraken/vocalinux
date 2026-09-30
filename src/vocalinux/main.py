@@ -643,6 +643,13 @@ def main():
                 if started_at <= transcription_history.cleared_at:
                     # Captured before the last clear — must not re-enter.
                     return
+                # Segments captured while the Settings mic test runs are test
+                # speech, not dictation; the floor is stamped before the test
+                # starts recognition, so leftovers from an earlier session —
+                # whose capture began before it — still file normally.
+                test_floor = getattr(speech_engine, "test_capture_floor", None)
+                if isinstance(test_floor, (int, float)) and started_at >= test_floor:
+                    return
                 if session_open and (
                     worker is session_worker
                     or worker is current_worker

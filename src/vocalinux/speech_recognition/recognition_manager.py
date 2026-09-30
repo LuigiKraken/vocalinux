@@ -1159,6 +1159,10 @@ class SpeechRecognitionManager:
         self.text_callbacks: list[Callable[[str], None]] = []
         # (text, capture-started_at) consumers, e.g. transcription history.
         self.segment_callbacks: list[Callable[[str, float], None]] = []
+        # While the Settings microphone test runs, segments whose capture
+        # began at or after this monotonic time are test speech; consumers
+        # (e.g. history) read the floor to skip them.
+        self.test_capture_floor: Optional[float] = None
         self.state_callbacks: list[Callable[[RecognitionState], None]] = []
         self.action_callbacks: list[Callable[[str], None]] = []
 
@@ -3273,14 +3277,6 @@ class SpeechRecognitionManager:
             callback: A function taking (recognized_text, capture_started_at)
         """
         self.segment_callbacks.append(callback)
-
-    def get_segment_callbacks(self) -> list[Callable[[str, float], None]]:
-        """Get a copy of the current segment callbacks list."""
-        return list(self.segment_callbacks)
-
-    def set_segment_callbacks(self, callbacks: list[Callable[[str, float], None]]) -> None:
-        """Set the segment callbacks list (cleared while testing dictation)."""
-        self.segment_callbacks = list(callbacks)
 
     def unregister_segment_callback(self, callback: Callable[[str, float], None]) -> None:
         """
