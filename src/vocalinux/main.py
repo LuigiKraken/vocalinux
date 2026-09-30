@@ -332,7 +332,11 @@ def main():
     from .ui.action_handler import ActionHandler
     from .ui.config_manager import get_shared_config_manager
     from .ui.logging_manager import initialize_logging
-    from .ui.transcription_history import TranscriptionHistory
+    from .ui.transcription_history import (
+        DEFAULT_MAX_ITEMS,
+        TranscriptionHistory,
+        sanitize_max_items,
+    )
 
     # Initialize logging manager early
     initialize_logging()
@@ -429,8 +433,10 @@ def main():
     advanced_settings = config_manager.get_settings().get("advanced", {})
 
     history_settings = config_manager.get_settings().get("history", {})
-    history_enabled = history_settings.get("enabled", True)
-    history_max_items = history_settings.get("max_items", 10)
+    history_enabled = bool(history_settings.get("enabled", True))
+    # A hand-edited config.json can hold a non-numeric or out-of-range value;
+    # sanitize on load so a bad preference cannot abort startup.
+    history_max_items = sanitize_max_items(history_settings.get("max_items", DEFAULT_MAX_ITEMS))
 
     logger.info(f"Final settings: engine={engine}, language={language}, model={model_size}")
     if audio_device_index is not None:

@@ -113,6 +113,7 @@ from .keyboard_backends import (  # noqa: E402
     parse_shortcut_spec,
 )
 from .keyboard_backends.evdev_backend import MODIFIER_KEY_CODES  # noqa: E402
+from .transcription_history import sanitize_max_items  # noqa: E402
 
 from ..utils.faster_whisper_model_info import (  # isort:skip
     FASTER_WHISPER_MODEL_INFO,
@@ -5658,8 +5659,10 @@ class SettingsDialog(Gtk.Dialog):
         auto_capitalize = text_injection_settings.get("auto_capitalize", True)
         append_trailing_space = text_injection_settings.get("append_trailing_space", True)
         paste_shortcut = self.config_manager.get_paste_shortcut()
-        history_enabled = history_settings.get("enabled", True)
-        history_max_items = history_settings.get("max_items", 10)
+        history_enabled = bool(history_settings.get("enabled", True))
+        # A hand-edited config.json can hold a non-numeric value; sanitize so a
+        # bad preference cannot crash the settings dialog.
+        history_max_items = sanitize_max_items(history_settings.get("max_items", 10))
 
         self.autostart_switch.set_active(autostart_enabled)
         self.start_minimized_switch.set_active(start_minimized)

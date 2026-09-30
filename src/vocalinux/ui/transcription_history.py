@@ -12,13 +12,32 @@ types by voice, and that should not silently accumulate in a file.
 import logging
 import threading
 from collections import deque
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 # Default number of snippets to retain. Kept small so the tray menu stays
 # readable; configurable via the "history" config section.
 DEFAULT_MAX_ITEMS = 10
+
+
+def sanitize_max_items(value: Any) -> int:
+    """Coerce a configured snippet cap to a positive int.
+
+    config.json is user-editable, so a saved ``history.max_items`` may be
+    missing, non-numeric, or out of range. An unusable value falls back to
+    ``DEFAULT_MAX_ITEMS`` rather than raising: a malformed preference must
+    never prevent the app from starting.
+    """
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid transcription history max_items %r; falling back to %d",
+            value,
+            DEFAULT_MAX_ITEMS,
+        )
+        return DEFAULT_MAX_ITEMS
 
 
 class TranscriptionHistory:
@@ -36,7 +55,7 @@ class TranscriptionHistory:
     """
 
     def __init__(self, max_items: int = DEFAULT_MAX_ITEMS, enabled: bool = True):
-        self._max_items = max(1, int(max_items))
+        self._max_items = sanitize_max_items(max_items)
         self._enabled = bool(enabled)
         self._entries: deque = deque(maxlen=self._max_items)
         self._lock = threading.Lock()
@@ -58,7 +77,7 @@ class TranscriptionHistory:
 
     def set_max_items(self, max_items: int) -> None:
         """Change the retained-snippet cap, trimming oldest entries if needed."""
-        max_items = max(1, int(max_items))
+        max_items = sanitize_max_items(max_items)
         with self._lock:
             if max_items == self._max_items:
                 return
