@@ -565,6 +565,13 @@ def main():
         # True when the newest history entry is the just-closed session's
         # snippet, so late segments can still merge into it.
         latest_snippet_extendable = False
+        # Clear epochs the open and most-recently-ended sessions run under.
+        # A history.clear() bumps the epoch, so text produced beforehand
+        # must not re-enter history afterwards; the two are kept separate
+        # because a new session can open while a previous worker is still
+        # delivering its final segment.
+        session_epoch = transcription_history.epoch
+        ended_session_epoch = session_epoch
 
         # --- Callback wiring ---------------------------------------------------
         # The speech engine emits three kinds of events, each handled by a
@@ -612,13 +619,17 @@ def main():
                     session_segments.append(segment)
                     return
                 # Late segment from a session that already ended: merge into
-                # its committed snippet when there is one.
-                if latest_snippet_extendable and transcription_history.extend_latest(segment):
+                # its committed snippet when there is one. Both writes are
+                # guarded by the ended session's epoch, so text dictated
+                # before a clear() cannot re-enter history afterwards.
+                if latest_snippet_extendable and transcription_history.extend_latest(
+                    segment, expected_epoch=ended_session_epoch
+                ):
                     return
                 # Otherwise the late segments are the session's only output
                 # and form their own snippet.
-                transcription_history.add(segment)
-                latest_snippet_extendable = True
+                if transcription_history.add(segment, expected_epoch=ended_session_epoch):
+                    latest_snippet_extendable = True
 
         def text_callback_wrapper(text: str) -> None:
             """Bridge between speech engine text events and the text injector.
@@ -680,20 +691,27 @@ def main():
             transcription history as a single snippet.
             """
             nonlocal session_open, session_worker, latest_snippet_extendable
+            nonlocal session_epoch, ended_session_epoch
             if state in (RecognitionState.IDLE, RecognitionState.ERROR):
                 if state == RecognitionState.IDLE:
                     action_handler.set_last_injected_text("")
                 with session_lock:
                     session_open = False
                     session_worker = None
+                    # The epoch this session opened under; late segments
+                    # from its worker are still judged against it.
+                    ended_session_epoch = session_epoch
                     joined = " ".join(session_segments)
                     session_segments.clear()
-                    # The committed snippet stays open to late segments still
-                    # trickling out of the worker; a session that produced no
-                    # text leaves no entry to merge into.
-                    latest_snippet_extendable = bool(joined)
-                    if joined:
-                        transcription_history.add(joined)
+                    # Guarded by the session's epoch: a clear() issued while
+                    # the session ran drops its snippet rather than letting
+                    # the cleared text back in. The committed snippet stays
+                    # open to late segments still trickling out of the
+                    # worker; a session that produced no text leaves no
+                    # entry to merge into.
+                    latest_snippet_extendable = transcription_history.add(
+                        joined, expected_epoch=ended_session_epoch
+                    )
             else:
                 with session_lock:
                     if not session_open:
@@ -701,11 +719,15 @@ def main():
                         session_worker = None
                         # Segments left over by a session that ended without a
                         # closing state commit as their own snippet rather
-                        # than leaking into the new session's.
+                        # than leaking into the new session's — filed under
+                        # the epoch that produced them, so a clear() between
+                        # the sessions keeps them out.
                         if session_segments:
-                            transcription_history.add(" ".join(session_segments))
+                            latest_snippet_extendable = transcription_history.add(
+                                " ".join(session_segments), expected_epoch=session_epoch
+                            )
                             session_segments.clear()
-                            latest_snippet_extendable = True
+                        session_epoch = transcription_history.epoch
 
         # Connect speech recognition to text injection and action handling
         speech_engine.register_text_callback(text_callback_wrapper)

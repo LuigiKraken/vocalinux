@@ -54,12 +54,15 @@ class TranscriptionHistory:
     onto the correct thread (e.g. via ``GLib.idle_add``).
     """
 
-    def __init__(self, max_items: int = DEFAULT_MAX_ITEMS, enabled: bool = True):
+    def __init__(self, max_items: int = DEFAULT_MAX_ITEMS, enabled: bool = True) -> None:
         self._max_items = sanitize_max_items(max_items)
         self._enabled = bool(enabled)
         self._entries: deque = deque(maxlen=self._max_items)
         self._lock = threading.Lock()
         self._change_callback: Optional[Callable[[], None]] = None
+        # Bumped every time the entries are wiped; lets callers refuse text
+        # produced before a clear so it cannot reappear afterwards.
+        self._epoch = 0
 
     def set_change_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Register a callback invoked whenever the history changes."""
@@ -74,6 +77,18 @@ class TranscriptionHistory:
     def max_items(self) -> int:
         """The maximum number of snippets retained."""
         return self._max_items
+
+    @property
+    def epoch(self) -> int:
+        """Clear generation, incremented each time the entries are wiped.
+
+        ``add`` and ``extend_latest`` take an ``expected_epoch`` and check
+        it atomically under the lock, so a caller holding the epoch from
+        before a ``clear`` can be refused instead of re-entering history
+        as fresh text.
+        """
+        with self._lock:
+            return self._epoch
 
     def set_max_items(self, max_items: int) -> None:
         """Change the retained-snippet cap, trimming oldest entries if needed."""
@@ -95,22 +110,32 @@ class TranscriptionHistory:
             self._enabled = enabled
             if not enabled:
                 self._entries.clear()
+                self._epoch += 1
         self._notify()
 
-    def add(self, text: str) -> None:
-        """Add a snippet. No-op when disabled or when text is empty."""
+    def add(self, text: str, *, expected_epoch: Optional[int] = None) -> bool:
+        """Add a snippet, returning True when it was recorded.
+
+        No-op when disabled or when text is empty. With ``expected_epoch``
+        the add is also refused once the epoch has advanced — i.e. the
+        history was cleared since that epoch was observed — so text
+        produced before the clear cannot reappear as a new entry.
+        """
         if not text:
-            return
+            return False
         text = text.strip()
         if not text:
-            return
+            return False
         with self._lock:
             if not self._enabled:
-                return
+                return False
+            if expected_epoch is not None and expected_epoch != self._epoch:
+                return False
             self._entries.append(text)
         self._notify()
+        return True
 
-    def extend_latest(self, text: str) -> bool:
+    def extend_latest(self, text: str, *, expected_epoch: Optional[int] = None) -> bool:
         """Append a late-arriving segment to the most recent snippet.
 
         The recognition worker can emit a final segment after its session
@@ -120,12 +145,16 @@ class TranscriptionHistory:
         becoming a snippet of its own or leaking into the next session.
 
         Returns False when there is nothing to extend (empty or disabled
-        history, or empty text).
+        history, or empty text) or when ``expected_epoch`` no longer matches
+        — the history was cleared since the caller observed that epoch, and
+        the cleared snippet must not grow back.
         """
         if not text or not text.strip():
             return False
         with self._lock:
             if not self._enabled or not self._entries:
+                return False
+            if expected_epoch is not None and expected_epoch != self._epoch:
                 return False
             self._entries[-1] = f"{self._entries[-1]} {text.strip()}"
         self._notify()
@@ -137,8 +166,14 @@ class TranscriptionHistory:
             return list(reversed(self._entries))
 
     def clear(self) -> None:
-        """Remove all snippets."""
+        """Remove all snippets.
+
+        The epoch advances even when the history is already empty: the
+        call still expresses "forget everything dictated so far", so
+        text still in flight from before it must not re-enter.
+        """
         with self._lock:
+            self._epoch += 1
             if not self._entries:
                 return
             self._entries.clear()
