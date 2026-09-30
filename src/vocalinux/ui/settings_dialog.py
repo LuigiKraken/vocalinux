@@ -7907,10 +7907,16 @@ class SettingsDialog(Gtk.Dialog):
 
         self._saved_text_callbacks = self.speech_engine.get_text_callbacks()
         self.speech_engine.set_text_callbacks([self._test_text_callback])
+        # History recording lives in segment callbacks: keep microphone test
+        # speech out of Recent Snippets the same way it stays out of injection.
+        self._saved_segment_callbacks = self.speech_engine.get_segment_callbacks()
+        self.speech_engine.set_segment_callbacks([])
 
         if not self.speech_engine.start_recognition():
             self.speech_engine.set_text_callbacks(self._saved_text_callbacks)
+            self.speech_engine.set_segment_callbacks(self._saved_segment_callbacks)
             del self._saved_text_callbacks
+            del self._saved_segment_callbacks
             self.test_output_revealer.set_reveal_child(True)
             if getattr(self.speech_engine, "is_auto_paused", False):
                 self.test_buffer.set_text(
@@ -7982,6 +7988,9 @@ class SettingsDialog(Gtk.Dialog):
         if hasattr(self, "_saved_text_callbacks"):
             self.speech_engine.set_text_callbacks(self._saved_text_callbacks)
             del self._saved_text_callbacks
+        if hasattr(self, "_saved_segment_callbacks"):
+            self.speech_engine.set_segment_callbacks(self._saved_segment_callbacks)
+            del self._saved_segment_callbacks
 
         # Check result after giving time for final callbacks to complete
         GLib.timeout_add(300, self._check_test_result)

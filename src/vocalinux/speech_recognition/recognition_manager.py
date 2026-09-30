@@ -3261,7 +3261,7 @@ class SpeechRecognitionManager:
         """Set the text callbacks list (used for temporarily replacing callbacks)."""
         self.text_callbacks = list(callbacks)
 
-    def register_segment_callback(self, callback: Callable[[str, float], None]):
+    def register_segment_callback(self, callback: Callable[[str, float], None]) -> None:
         """
         Register a callback invoked with ``(text, started_at)`` per segment.
 
@@ -3274,7 +3274,15 @@ class SpeechRecognitionManager:
         """
         self.segment_callbacks.append(callback)
 
-    def unregister_segment_callback(self, callback: Callable[[str, float], None]):
+    def get_segment_callbacks(self) -> list[Callable[[str, float], None]]:
+        """Get a copy of the current segment callbacks list."""
+        return list(self.segment_callbacks)
+
+    def set_segment_callbacks(self, callbacks: list[Callable[[str, float], None]]) -> None:
+        """Set the segment callbacks list (cleared while testing dictation)."""
+        self.segment_callbacks = list(callbacks)
+
+    def unregister_segment_callback(self, callback: Callable[[str, float], None]) -> None:
         """
         Unregister a segment callback function.
 
