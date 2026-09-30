@@ -7,6 +7,8 @@ import argparse
 import atexit
 import logging
 import sys
+import threading
+from typing import Optional
 
 from .utils.vosk_model_info import SUPPORTED_LANGUAGES
 from .version import __version__
@@ -488,9 +490,26 @@ def main():
         transcription_history = TranscriptionHistory(
             max_items=history_max_items, enabled=history_enabled
         )
-        # Segments dictated during the current session, joined and committed to
+        # Segments dictated during the open session, joined and committed to
         # history when the session ends (state returns to IDLE).
-        session_segments = []
+        #
+        # Session association: stop_recognition() emits IDLE after only a
+        # bounded wait on the recognition worker, so a slow final segment can
+        # still fire its text callback afterwards. Each segment must land in
+        # the session that produced it: while a session is open, segments
+        # accumulate in session_segments; a segment arriving on a worker that
+        # is not the open session's worker (or while no session is open) is a
+        # leftover of the just-ended session and is folded into its snippet
+        # instead of leaking into the next one.
+        session_lock = threading.Lock()
+        session_segments: list[str] = []
+        session_open = False
+        # Worker thread that produced the open session's segments; used to
+        # detect callbacks from a previous session's still-running worker.
+        session_worker: Optional[threading.Thread] = None
+        # True when the newest history entry is the just-closed session's
+        # snippet, so late segments can still merge into it.
+        latest_snippet_extendable = False
 
         # --- Callback wiring ---------------------------------------------------
         # The speech engine emits three kinds of events, each handled by a
@@ -511,6 +530,40 @@ def main():
         #       etc.).  Used here to clear the "last injected" buffer after a
         #       listening session ends.
         # ------------------------------------------------------------------
+
+        def record_history_segment(segment: str) -> None:
+            """File a recognized segment under the dictation session it came from.
+
+            Runs on the recognition worker thread. While a session is open,
+            segments accumulate into that session's pending snippet. A segment
+            delivered after the session was finalized — the worker can outlive
+            the manager's bounded stop wait and emit text after IDLE — is
+            folded into its own session's snippet rather than the next one.
+            """
+            nonlocal session_worker, latest_snippet_extendable
+            worker = threading.current_thread()
+            # The engine's live worker, when it exposes one: a segment from
+            # any other thread is a leftover from an older session.
+            current_worker = getattr(speech_engine, "recognition_thread", None)
+            with session_lock:
+                if session_open and (
+                    worker is session_worker
+                    or worker is current_worker
+                    # When the engine exposes no worker (tests, mocks), the
+                    # first segment of a session tags it.
+                    or (session_worker is None and not isinstance(current_worker, threading.Thread))
+                ):
+                    session_worker = worker
+                    session_segments.append(segment)
+                    return
+                # Late segment from a session that already ended: merge into
+                # its committed snippet when there is one.
+                if latest_snippet_extendable and transcription_history.extend_latest(segment):
+                    return
+                # Otherwise the late segments are the session's only output
+                # and form their own snippet.
+                transcription_history.add(segment)
+                latest_snippet_extendable = True
 
         def text_callback_wrapper(text: str) -> None:
             """Bridge between speech engine text events and the text injector.
@@ -543,7 +596,7 @@ def main():
             # primary reason to keep a history. Stored clean, without the
             # inter-segment space added below.
             if transcription_history.enabled:
-                session_segments.append(text_to_inject)
+                record_history_segment(text_to_inject)
 
             # Read from disk so the Settings toggle applies without restart.
             append_trailing_space = _should_append_trailing_space()
@@ -571,11 +624,33 @@ def main():
             Also commits the just-finished dictation session to the
             transcription history as a single snippet.
             """
-            if state == RecognitionState.IDLE:
-                action_handler.set_last_injected_text("")
-                if session_segments:
-                    transcription_history.add(" ".join(session_segments))
+            nonlocal session_open, session_worker, latest_snippet_extendable
+            if state in (RecognitionState.IDLE, RecognitionState.ERROR):
+                if state == RecognitionState.IDLE:
+                    action_handler.set_last_injected_text("")
+                with session_lock:
+                    session_open = False
+                    session_worker = None
+                    joined = " ".join(session_segments)
                     session_segments.clear()
+                    # The committed snippet stays open to late segments still
+                    # trickling out of the worker; a session that produced no
+                    # text leaves no entry to merge into.
+                    latest_snippet_extendable = bool(joined)
+                    if joined:
+                        transcription_history.add(joined)
+            else:
+                with session_lock:
+                    if not session_open:
+                        session_open = True
+                        session_worker = None
+                        # Segments left over by a session that ended without a
+                        # closing state commit as their own snippet rather
+                        # than leaking into the new session's.
+                        if session_segments:
+                            transcription_history.add(" ".join(session_segments))
+                            session_segments.clear()
+                            latest_snippet_extendable = True
 
         # Connect speech recognition to text injection and action handling
         speech_engine.register_text_callback(text_callback_wrapper)

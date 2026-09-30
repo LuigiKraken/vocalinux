@@ -60,6 +60,65 @@ class TestTranscriptionHistory(unittest.TestCase):
         history.add("b")
         self.assertEqual(history.get_all(), ["b"])
 
+    def test_invalid_max_items_falls_back_to_default(self):
+        self.assertEqual(TranscriptionHistory(max_items="abc").max_items, DEFAULT_MAX_ITEMS)
+        self.assertEqual(TranscriptionHistory(max_items=None).max_items, DEFAULT_MAX_ITEMS)
+        self.assertEqual(TranscriptionHistory(max_items=[1]).max_items, DEFAULT_MAX_ITEMS)
+
+    def test_numeric_string_max_items_accepted(self):
+        history = TranscriptionHistory(max_items="4")
+        self.assertEqual(history.max_items, 4)
+
+    def test_set_max_items_invalid_falls_back_to_default(self):
+        history = TranscriptionHistory(max_items=3)
+        history.set_max_items("bogus")
+        self.assertEqual(history.max_items, DEFAULT_MAX_ITEMS)
+
+    def test_extend_latest_appends_to_newest_entry(self):
+        history = TranscriptionHistory()
+        history.add("one")
+        self.assertTrue(history.extend_latest("late tail"))
+        self.assertEqual(history.get_all(), ["one late tail"])
+
+    def test_extend_latest_only_touches_newest_entry(self):
+        history = TranscriptionHistory()
+        history.add("one")
+        history.add("two")
+        history.extend_latest("tail")
+        self.assertEqual(history.get_all(), ["two tail", "one"])
+
+    def test_extend_latest_strips_segment_whitespace(self):
+        history = TranscriptionHistory()
+        history.add("one")
+        history.extend_latest("  tail  ")
+        self.assertEqual(history.get_all(), ["one tail"])
+
+    def test_extend_latest_empty_history_returns_false(self):
+        self.assertFalse(TranscriptionHistory().extend_latest("x"))
+
+    def test_extend_latest_disabled_returns_false(self):
+        self.assertFalse(TranscriptionHistory(enabled=False).extend_latest("x"))
+
+    def test_extend_latest_blank_text_returns_false(self):
+        history = TranscriptionHistory()
+        history.add("one")
+        self.assertFalse(history.extend_latest("   "))
+        self.assertEqual(history.get_all(), ["one"])
+
+    def test_extend_latest_after_clear_returns_false(self):
+        history = TranscriptionHistory()
+        history.add("a")
+        history.clear()
+        self.assertFalse(history.extend_latest("x"))
+
+    def test_extend_latest_fires_change_callback(self):
+        history = TranscriptionHistory()
+        history.add("a")
+        calls = []
+        history.set_change_callback(lambda: calls.append(1))
+        history.extend_latest("b")
+        self.assertEqual(calls, [1])
+
     def test_clear(self):
         history = TranscriptionHistory()
         history.add("a")

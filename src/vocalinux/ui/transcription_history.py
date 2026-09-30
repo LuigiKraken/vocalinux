@@ -110,6 +110,27 @@ class TranscriptionHistory:
             self._entries.append(text)
         self._notify()
 
+    def extend_latest(self, text: str) -> bool:
+        """Append a late-arriving segment to the most recent snippet.
+
+        The recognition worker can emit a final segment after its session
+        already ended (the manager stops waiting for it after a bounded
+        timeout and reports IDLE anyway). That text belongs to the just-ended
+        session's snippet, so it is merged into the newest entry instead of
+        becoming a snippet of its own or leaking into the next session.
+
+        Returns False when there is nothing to extend (empty or disabled
+        history, or empty text).
+        """
+        if not text or not text.strip():
+            return False
+        with self._lock:
+            if not self._enabled or not self._entries:
+                return False
+            self._entries[-1] = f"{self._entries[-1]} {text.strip()}"
+        self._notify()
+        return True
+
     def get_all(self) -> List[str]:
         """Return all snippets, newest first."""
         with self._lock:
