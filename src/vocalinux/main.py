@@ -602,7 +602,7 @@ def main():
             the manager's bounded stop wait and emit text after IDLE — is
             folded into its own session's snippet rather than the next one.
             """
-            nonlocal session_worker, latest_snippet_extendable
+            nonlocal session_worker, latest_snippet_extendable, session_epoch
             worker = threading.current_thread()
             # The engine's live worker, when it exposes one: a segment from
             # any other thread is a leftover from an older session.
@@ -615,6 +615,12 @@ def main():
                     # first segment of a session tags it.
                     or (session_worker is None and not isinstance(current_worker, threading.Thread))
                 ):
+                    if transcription_history.epoch != session_epoch:
+                        # A clear() landed mid-session: drop the segments
+                        # spoken before it and re-bind the session to the new
+                        # epoch so text dictated after the clear is kept.
+                        session_segments.clear()
+                        session_epoch = transcription_history.epoch
                     session_worker = worker
                     session_segments.append(segment)
                     return
