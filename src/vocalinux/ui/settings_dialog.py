@@ -3430,7 +3430,7 @@ class SettingsDialog(Gtk.Dialog):
         self.config_manager.set("model_keepalive", "idle_timeout_seconds", seconds)
         self.config_manager.save_settings()
 
-    def _on_history_enabled_toggled(self, widget, state):
+    def _on_history_enabled_toggled(self, widget: Gtk.Switch, state: bool) -> bool:
         """Handle toggle of the keep-history switch."""
         if self._initializing or self._applying_settings:
             return False
@@ -3441,7 +3441,7 @@ class SettingsDialog(Gtk.Dialog):
         self.config_manager.save_settings()
         return False
 
-    def _on_history_max_items_changed(self, widget):
+    def _on_history_max_items_changed(self, widget: Gtk.SpinButton) -> None:
         """Handle change of the snippets-to-keep spin button."""
         if self._initializing or self._applying_settings:
             return

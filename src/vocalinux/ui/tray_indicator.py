@@ -825,7 +825,7 @@ class TrayIndicator:
         logger.debug("Stop Voice Typing clicked")
         self.speech_engine.stop_recognition()
 
-    def _refresh_history_menu(self):
+    def _refresh_history_menu(self) -> bool:
         """Rebuild the Recent Snippets submenu from the current history."""
         if self._history_menu_item is None or self.transcription_history is None:
             return False  # Remove idle callback
@@ -863,7 +863,7 @@ class TrayIndicator:
             return single_line[: _HISTORY_LABEL_MAX_CHARS - 1].rstrip() + "…"
         return single_line
 
-    def _on_history_item_clicked(self, widget, text: str):
+    def _on_history_item_clicked(self, widget: Gtk.MenuItem, text: str) -> None:
         """Copy the selected snippet to the clipboard."""
         logger.debug("History snippet clicked, copying to clipboard")
         # Lazy import keeps the module importable when gi.repository is a
@@ -874,7 +874,7 @@ class TrayIndicator:
         clipboard.set_text(text, -1)
         clipboard.store()
 
-    def _on_clear_history_clicked(self, widget):
+    def _on_clear_history_clicked(self, widget: Gtk.MenuItem) -> None:
         """Clear all stored snippets."""
         logger.debug("Clear history clicked")
         if self.transcription_history is not None:
