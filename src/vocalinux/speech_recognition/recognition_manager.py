@@ -55,6 +55,21 @@ from .command_processor import CommandProcessor
 from .silero_vad import SILERO_CHUNK_SIZE, load_silero_vad
 
 
+class _AudioSegment(list):
+    """A queued audio segment that knows when its capture began.
+
+    Stays a plain ``list`` of chunks so consumers (including tests that put
+    or compare raw buffers) see an ordinary segment; ``started_at`` is the
+    ``time.monotonic()`` timestamp of its first captured chunk. That stamp
+    is what lets a listener tell speech captured before a point in time
+    from speech captured after it, however late the decode finishes.
+    """
+
+    def __init__(self, chunks: list[bytes], started_at: Optional[float]) -> None:
+        super().__init__(chunks)
+        self.started_at = started_at
+
+
 def _pywhispercpp_distribution_version() -> Optional[tuple[int, ...]]:
     """Installed pywhispercpp version, or None if it cannot be read.
 
@@ -1142,6 +1157,8 @@ class SpeechRecognitionManager:
         self._voice_commands_enabled = self._resolve_voice_commands_enabled()
 
         self.text_callbacks: list[Callable[[str], None]] = []
+        # (text, capture-started_at) consumers, e.g. transcription history.
+        self.segment_callbacks: list[Callable[[str, float], None]] = []
         self.state_callbacks: list[Callable[[RecognitionState], None]] = []
         self.action_callbacks: list[Callable[[str], None]] = []
 
@@ -1205,6 +1222,9 @@ class SpeechRecognitionManager:
         self.should_record = False
         self._recognition_mode = "toggle"  # "toggle" or "push_to_talk"
         self.audio_buffer = []
+        # Monotonic time the current buffer's first chunk was captured,
+        # propagated onto each enqueued _AudioSegment.
+        self._segment_started_at: Optional[float] = None
         self._recording_segment_has_speech = False
         self._buffer_lock = threading.Lock()  # Thread safety for audio_buffer
         self._model_lock = threading.Lock()  # Thread safety for model/recognizer access
@@ -3241,6 +3261,32 @@ class SpeechRecognitionManager:
         """Set the text callbacks list (used for temporarily replacing callbacks)."""
         self.text_callbacks = list(callbacks)
 
+    def register_segment_callback(self, callback: Callable[[str, float], None]):
+        """
+        Register a callback invoked with ``(text, started_at)`` per segment.
+
+        ``started_at`` is the ``time.monotonic()`` timestamp when the
+        segment's audio capture began. Segment callbacks run on the
+        recognition thread just before the text callbacks.
+
+        Args:
+            callback: A function taking (recognized_text, capture_started_at)
+        """
+        self.segment_callbacks.append(callback)
+
+    def unregister_segment_callback(self, callback: Callable[[str, float], None]):
+        """
+        Unregister a segment callback function.
+
+        Args:
+            callback: The callback function to remove.
+        """
+        try:
+            self.segment_callbacks.remove(callback)
+            logger.debug(f"Unregistered segment callback: {callback}")
+        except ValueError:
+            logger.warning(f"Callback {callback} not found in segment_callbacks.")
+
     def register_state_callback(self, callback: Callable[[RecognitionState], None]):
         """
         Register a callback function that will be called when the recognition state changes.
@@ -3485,6 +3531,7 @@ class SpeechRecognitionManager:
         self.should_record = True
         self._recognition_mode = mode
         self.audio_buffer = []
+        self._segment_started_at = None
         self._segment_queue = queue.Queue(maxsize=32)
 
         # Start the audio recording thread
@@ -3746,6 +3793,12 @@ class SpeechRecognitionManager:
                             ).astype(np.int16)
                             data = resampled.tobytes()
 
+                        if not self.audio_buffer:
+                            # First chunk of a new segment: remember when its
+                            # capture began. A mid-session history clear
+                            # compares against this to separate speech
+                            # captured before it from speech captured after.
+                            self._segment_started_at = time.monotonic()
                         self.audio_buffer.append(data)
 
                     # Voice Activity Detection (VAD)
@@ -3992,6 +4045,11 @@ class SpeechRecognitionManager:
                 f"processed_text='{processed_text[:50] if processed_text else '(empty)'}...', callbacks={len(self.text_callbacks)}"
             )
             if processed_text:
+                started_at = getattr(audio_buffer, "started_at", None)
+                if started_at is None:
+                    started_at = time.monotonic()
+                for segment_callback in self.segment_callbacks:
+                    segment_callback(processed_text, started_at)
                 for callback in self.text_callbacks:
                     logger.debug(
                         f"invoking text callback: {callback.__name__ if hasattr(callback, '__name__') else callback}"
@@ -4063,7 +4121,7 @@ class SpeechRecognitionManager:
 
     def _enqueue_audio_segment(self, audio_buffer: list[bytes]):
         """Queue an audio segment for asynchronous transcription."""
-        segment = audio_buffer.copy()
+        segment = _AudioSegment(audio_buffer.copy(), self._segment_started_at)
         if not segment:
             logger.warning("_enqueue_audio_segment called with empty buffer")
             return

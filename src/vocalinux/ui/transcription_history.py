@@ -11,6 +11,7 @@ types by voice, and that should not silently accumulate in a file.
 
 import logging
 import threading
+import time
 from collections import deque
 from typing import Any, Callable, List, Optional
 
@@ -63,6 +64,10 @@ class TranscriptionHistory:
         # Bumped every time the entries are wiped; lets callers refuse text
         # produced before a clear so it cannot reappear afterwards.
         self._epoch = 0
+        # Monotonic time of the last wipe. Segments carry the moment their
+        # audio capture began, so text decoded from speech captured before
+        # this point can be refused however late it arrives.
+        self._cleared_at = 0.0
 
     def set_change_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Register a callback invoked whenever the history changes."""
@@ -90,6 +95,17 @@ class TranscriptionHistory:
         with self._lock:
             return self._epoch
 
+    @property
+    def cleared_at(self) -> float:
+        """``time.monotonic()`` of the most recent wipe, or 0.0 if never.
+
+        A recognized segment whose audio capture began at or before this
+        timestamp can only contain pre-clear speech and must not re-enter
+        history; anything captured afterwards is genuinely new dictation.
+        """
+        with self._lock:
+            return self._cleared_at
+
     def set_max_items(self, max_items: int) -> None:
         """Change the retained-snippet cap, trimming oldest entries if needed."""
         max_items = sanitize_max_items(max_items)
@@ -111,6 +127,7 @@ class TranscriptionHistory:
             if not enabled:
                 self._entries.clear()
                 self._epoch += 1
+                self._cleared_at = time.monotonic()
         self._notify()
 
     def add(self, text: str, *, expected_epoch: Optional[int] = None) -> bool:
@@ -174,6 +191,7 @@ class TranscriptionHistory:
         """
         with self._lock:
             self._epoch += 1
+            self._cleared_at = time.monotonic()
             if not self._entries:
                 return
             self._entries.clear()

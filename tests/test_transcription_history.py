@@ -220,6 +220,22 @@ class TestTranscriptionHistory(unittest.TestCase):
         self.assertTrue(history.add("b"))
         self.assertEqual(history.get_all(), ["b"])
 
+    # --- Clear timestamp ---------------------------------------------------
+
+    def test_cleared_at_advances_on_clear(self) -> None:
+        history = TranscriptionHistory()
+        self.assertEqual(history.cleared_at, 0.0)
+        history.clear()
+        self.assertGreater(history.cleared_at, 0.0)
+        first = history.cleared_at
+        history.clear()
+        self.assertGreaterEqual(history.cleared_at, first)
+
+    def test_cleared_at_advances_on_disable(self) -> None:
+        history = TranscriptionHistory()
+        history.set_enabled(False)
+        self.assertGreater(history.cleared_at, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
