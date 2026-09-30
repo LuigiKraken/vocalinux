@@ -6,6 +6,8 @@ import argparse
 import sys
 import threading
 import unittest
+from contextlib import ExitStack
+from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import ANY, MagicMock, patch
 
 # Mock GTK modules before importing vocalinux.main
@@ -15,6 +17,7 @@ sys.modules["gi.repository"] = MagicMock()
 # Update import to use the new package structure
 from vocalinux.common_types import RecognitionState
 from vocalinux.main import check_dependencies, main, parse_arguments
+from vocalinux.ui.transcription_history import TranscriptionHistory
 
 
 class TestMainModule(unittest.TestCase):
@@ -1357,14 +1360,17 @@ class TestMainCallbackTrailingSpaceEdges(unittest.TestCase):
 class TestSessionHistoryRecording(unittest.TestCase):
     """Segments commit to transcription history as one snippet per session."""
 
-    def _boot(self, *, extra_settings=None):
+    def _boot(self, *, extra_settings: Optional[Dict[str, Any]] = None) -> Tuple[
+        ExitStack,
+        Callable[[str], None],
+        Callable[[RecognitionState], None],
+        TranscriptionHistory,
+    ]:
         """Boot main() under mocks; return (stack, text_cb, state_cb, history).
 
         The history is the real TranscriptionHistory instance handed to the
         (mocked) TrayIndicator, so assertions observe actual recording.
         """
-        from contextlib import ExitStack
-
         stack = ExitStack()
         stack.enter_context(patch("vocalinux.main.check_dependencies", return_value=True))
         mock_config_cls = stack.enter_context(
@@ -1421,7 +1427,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
 
         return stack, text_cb, state_cb, history
 
-    def test_session_segments_commit_as_single_snippet(self):
+    def test_session_segments_commit_as_single_snippet(self) -> None:
         stack, text_cb, state_cb, history = self._boot()
         try:
             state_cb(RecognitionState.LISTENING)
@@ -1434,7 +1440,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_successive_sessions_record_separate_snippets_newest_first(self):
+    def test_successive_sessions_record_separate_snippets_newest_first(self) -> None:
         stack, text_cb, state_cb, history = self._boot()
         try:
             state_cb(RecognitionState.LISTENING)
@@ -1449,7 +1455,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_late_segment_merges_into_its_own_sessions_snippet(self):
+    def test_late_segment_merges_into_its_own_sessions_snippet(self) -> None:
         """A worker that outlives the bounded stop wait lands in its snippet."""
         stack, text_cb, state_cb, history = self._boot()
         try:
@@ -1469,7 +1475,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_late_segment_from_old_worker_during_next_session(self):
+    def test_late_segment_from_old_worker_during_next_session(self) -> None:
         """A leftover worker delivering on its own thread stays out of the open session."""
         stack, text_cb, state_cb, history = self._boot()
         try:
@@ -1490,7 +1496,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_session_without_segments_creates_no_snippet(self):
+    def test_session_without_segments_creates_no_snippet(self) -> None:
         stack, text_cb, state_cb, history = self._boot()
         try:
             state_cb(RecognitionState.LISTENING)
@@ -1504,7 +1510,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_error_state_also_commits_partial_snippet(self):
+    def test_error_state_also_commits_partial_snippet(self) -> None:
         stack, text_cb, state_cb, history = self._boot()
         try:
             state_cb(RecognitionState.LISTENING)
@@ -1514,7 +1520,7 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_history_disabled_records_nothing(self):
+    def test_history_disabled_records_nothing(self) -> None:
         stack, text_cb, state_cb, history = self._boot(
             extra_settings={"history": {"enabled": False}}
         )
@@ -1526,11 +1532,50 @@ class TestSessionHistoryRecording(unittest.TestCase):
         finally:
             stack.close()
 
-    def test_invalid_history_max_items_uses_default(self):
+    def test_invalid_history_max_items_uses_default(self) -> None:
         """A corrupted saved limit must not prevent startup."""
         stack, _, _, history = self._boot(extra_settings={"history": {"max_items": "abc"}})
         try:
             self.assertEqual(history.max_items, 10)
+        finally:
+            stack.close()
+
+    def test_late_segment_after_clear_does_not_reappear(self) -> None:
+        """A straggler from an ended session must not resurrect cleared history."""
+        stack, text_cb, state_cb, history = self._boot()
+        try:
+            state_cb(RecognitionState.LISTENING)
+            text_cb("before clear")
+            state_cb(RecognitionState.IDLE)
+            self.assertEqual(history.get_all(), ["before clear"])
+
+            history.clear()
+            text_cb("late tail")
+            self.assertEqual(history.get_all(), [])
+        finally:
+            stack.close()
+
+    def test_late_orphan_segment_after_clear_does_not_reappear(self) -> None:
+        """Late-only output of an empty session is refused after a clear too."""
+        stack, text_cb, state_cb, history = self._boot()
+        try:
+            state_cb(RecognitionState.LISTENING)
+            state_cb(RecognitionState.IDLE)  # empty session: no snippet
+            history.clear()
+            text_cb("orphan")
+            self.assertEqual(history.get_all(), [])
+        finally:
+            stack.close()
+
+    def test_clear_during_session_drops_its_snippet(self) -> None:
+        """A clear issued while a session runs keeps its whole snippet out."""
+        stack, text_cb, state_cb, history = self._boot()
+        try:
+            state_cb(RecognitionState.LISTENING)
+            text_cb("dictated")
+            history.clear()
+            state_cb(RecognitionState.IDLE)
+            self.assertEqual(history.get_all(), [])
         finally:
             stack.close()
 
